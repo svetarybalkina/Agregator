@@ -1,0 +1,187 @@
+import logging
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class BotHandler:
+    def __init__(self, config_manager, user_client, run_collection_callback=None):
+        self.config = config_manager
+        self.user_client = user_client
+        self.run_collection_callback = run_collection_callback
+        self.application = None
+    
+    def init_bot(self):
+        token = self.config.get_setting('bot_token')
+        if not token:
+            raise ValueError("Не указан токен бота")
+        self.application = Application.builder().token(token).build()
+        self.application.add_handler(CommandHandler("start", self.cmd_start))
+        self.application.add_handler(CommandHandler("add_channel", self.cmd_add_channel))
+        self.application.add_handler(CommandHandler("remove_channel", self.cmd_remove_channel))
+        self.application.add_handler(CommandHandler("list_channels", self.cmd_list_channels))
+        self.application.add_handler(CommandHandler("set_target", self.cmd_set_target))
+        self.application.add_handler(CommandHandler("set_limit", self.cmd_set_limit))
+        self.application.add_handler(CommandHandler("set_time", self.cmd_set_time))
+        self.application.add_handler(CommandHandler("run_now", self.cmd_run_now))
+        self.application.add_handler(CommandHandler("status", self.cmd_status))
+        return self.application
+    
+    def _check_admin(self, update: Update) -> bool:
+        admin_ids = self.config.get_setting('admin_ids', [])
+        user_id = update.effective_user.id
+        if not admin_ids or admin_ids == [0]:
+            self.config.set_setting('admin_ids', [user_id])
+            return True
+        return user_id in admin_ids
+    
+    async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._check_admin(update):
+            await update.message.reply_text("⛔ У вас нет доступа.")
+            return
+        await update.message.reply_text(
+            "🤖 Агрегатор каналов (авторепост)\n\n"
+            "/add_channel @channel — добавить источник\n"
+            "/remove_channel @channel — удалить источник\n"
+            "/list_channels — список источников\n"
+            "/set_target @channel — задать целевой канал\n"
+            "/set_limit N или all — лимит постов\n"
+            "/set_time ЧЧ:ММ — время сбора\n"
+            "/run_now — запустить сбор и публикацию сейчас\n"
+            "/status — статус"
+        )
+    
+    async def cmd_add_channel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._check_admin(update):
+            return
+        if not context.args:
+            await update.message.reply_text("❌ Укажите канал: /add_channel @channelname")
+            return
+        channel = context.args[0]
+        if not channel.startswith('@'):
+            channel = '@' + channel
+        try:
+            if self.config.add_source_channel(channel):
+                await update.message.reply_text(f"✅ Канал {channel} добавлен")
+            else:
+                await update.message.reply_text(f"⚠️ Уже в списке")
+        except ValueError as e:
+            await update.message.reply_text(f"❌ {e}")
+    
+    async def cmd_remove_channel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._check_admin(update):
+            return
+        if not context.args:
+            await update.message.reply_text("❌ Укажите канал: /remove_channel @channelname")
+            return
+        channel = context.args[0]
+        if not channel.startswith('@'):
+            channel = '@' + channel
+        if self.config.remove_source_channel(channel):
+            await update.message.reply_text(f"✅ Канал {channel} удален")
+        else:
+            await update.message.reply_text(f"⚠️ Не найден")
+    
+    async def cmd_list_channels(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._check_admin(update):
+            return
+        channels = self.config.get_setting('source_channels', [])
+        target = self.config.get_setting('target_channel', 'не задан')
+        text = "📋 Каналы-источники:\n" + "\n".join([f"• {ch}" for ch in channels]) if channels else "📋 Список пуст"
+        text += f"\n🎯 Целевой канал: {target}"
+        await update.message.reply_text(text)
+    
+    async def cmd_set_target(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._check_admin(update):
+            return
+        if not context.args:
+            await update.message.reply_text("❌ Укажите канал: /set_target @channelname")
+            return
+        channel = context.args[0]
+        if not channel.startswith('@'):
+            channel = '@' + channel
+        self.config.set_setting('target_channel', channel)
+        await update.message.reply_text(f"✅ Целевой канал: {channel}")
+    
+    async def cmd_set_limit(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._check_admin(update):
+            return
+        if not context.args:
+            await update.message.reply_text("❌ Укажите число или 'all': /set_limit 3")
+            return
+        limit = context.args[0]
+        if limit.lower() == 'all':
+            self.config.set_setting('post_limit', 'all')
+            await update.message.reply_text("✅ Будем отбирать все посты")
+        else:
+            try:
+                num = int(limit)
+                if 1 <= num <= 10:
+                    self.config.set_setting('post_limit', num)
+                    await update.message.reply_text(f"✅ Лимит: {num}")
+                else:
+                    await update.message.reply_text("❌ От 1 до 10")
+            except ValueError:
+                await update.message.reply_text("❌ Число или 'all'")
+    
+    async def cmd_set_time(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._check_admin(update):
+            return
+        if not context.args:
+            await update.message.reply_text("❌ Укажите время: /set_time 11:00")
+            return
+        time_str = context.args[0]
+        try:
+            hour, minute = map(int, time_str.split(':'))
+            if 0 <= hour < 24 and 0 <= minute < 60:
+                self.config.set_setting('schedule_time', time_str)
+                await update.message.reply_text(f"✅ Время сбора: {time_str}")
+            else:
+                await update.message.reply_text("❌ Неверное время")
+        except ValueError:
+            await update.message.reply_text("❌ Формат: ЧЧ:ММ")
+    
+    async def cmd_run_now(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._check_admin(update):
+            return
+        await update.message.reply_text("🚀 Запускаю сбор и публикацию...")
+        if self.run_collection_callback:
+            await self.run_collection_callback()
+            await update.message.reply_text("✅ Сбор выполнен, первая публикация сейчас, далее каждый час")
+        else:
+            await update.message.reply_text("❌ Ошибка: коллбек не настроен")
+    
+    async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._check_admin(update):
+            return
+        channels = self.config.get_setting('source_channels', [])
+        target = self.config.get_setting('target_channel', 'не задан')
+        limit = self.config.get_setting('post_limit', 3)
+        time_str = self.config.get_setting('schedule_time', '11:00')
+        history_count = len(self.config.posted_history)
+        queue_count = len(self.config.get_queue())
+        status = (
+            f"📊 Статус:\n"
+            f"Источников: {len(channels)}/10\n"
+            f"Целевой: {target}\n"
+            f"Лимит: {limit}\n"
+            f"Время: {time_str}\n"
+            f"В истории: {history_count}\n"
+            f"В очереди: {queue_count}"
+        )
+        await update.message.reply_text(status)
+    
+    async def send_notification(self, message: str):
+        admin_ids = self.config.get_setting('admin_ids', [])
+        if not admin_ids or admin_ids == [0] or not self.application:
+            return
+        try:
+            await self.application.bot.send_message(
+                admin_ids[0],
+                text=message,
+                read_timeout=30,
+                write_timeout=30
+            )
+        except Exception as e:
+            logger.error(f"Не удалось отправить уведомление: {e}")
