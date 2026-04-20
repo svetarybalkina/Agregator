@@ -28,7 +28,6 @@ class AggregatorApp:
         )
         self.shutdown_event = asyncio.Event()
         self.collection_done_today = False
-        self.queue_task = None
     
     async def collection_task(self):
         while not self.shutdown_event.is_set():
@@ -55,61 +54,12 @@ class AggregatorApp:
         try:
             posts, reports = await self.user_client.collect_posts()
             if posts:
-                self.config.set_queue(posts)
-                reports.append(f"\n📥 {len(posts)} постов в очереди")
-                reports.append("⏰ Первая публикация сейчас, далее каждый час")
-                if self.queue_task and not self.queue_task.done():
-                    self.queue_task.cancel()
-                    try:
-                        await self.queue_task
-                    except asyncio.CancelledError:
-                        pass
-                self.queue_task = asyncio.create_task(self.process_queue())
-            else:
-                reports.append("\n📭 Очередь пуста")
-            await self.bot_handler.send_notification("\n".join(reports))
+                self.user_client.mark_as_posted(posts)
+            await self.bot_handler.send_links(posts, reports)
         except Exception as e:
-            error_msg = f"❌ Ошибка сбора: {str(e)}"
+            error_msg = f"❌ Ошибка: {str(e)}"
             logger.error(error_msg, exc_info=True)
-            await self.bot_handler.send_notification(error_msg)
-    
-    async def process_queue(self):
-        while not self.shutdown_event.is_set():
-            queue = self.config.get_queue()
-            if not queue:
-                logger.info("Очередь пуста.")
-                return
-            await self.publish_next_post()
-            if not self.config.get_queue():
-                logger.info("Все посты опубликованы.")
-                return
-            logger.info("Следующая публикация через 1 час...")
-            try:
-                await asyncio.wait_for(self.shutdown_event.wait(), timeout=3600)
-            except asyncio.TimeoutError:
-                pass
-            except asyncio.CancelledError:
-                raise
-    
-    async def publish_next_post(self):
-        item = self.config.pop_queue()
-        if not item:
-            return
-        try:
-            result = await self.user_client.forward_single_post(item)
-            await self.bot_handler.send_notification(result)
-            remaining = len(self.config.get_queue())
-            if remaining > 0:
-                await self.bot_handler.send_notification(f"📋 Осталось в очереди: {remaining}")
-            else:
-                await self.bot_handler.send_notification("✅ Очередь пуста")
-        except Exception as e:
-            error_msg = f"❌ Ошибка публикации: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            await self.bot_handler.send_notification(error_msg)
-            queue = self.config.get_queue()
-            queue.insert(0, item)
-            self.config.set_queue(queue)
+            await self.bot_handler.send_links([], [error_msg])
     
     async def check_missed_collection(self):
         now = datetime.now()
@@ -134,7 +84,7 @@ class AggregatorApp:
     
     async def run(self):
         logger.info("=" * 50)
-        logger.info("Запуск агрегатора (авторепост)")
+        logger.info("Запуск агрегатора (режим ссылок)")
         logger.info("Python: " + sys.version)
         logger.info("=" * 50)
         await self.user_client.connect()
@@ -149,14 +99,12 @@ class AggregatorApp:
             application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
         )
         target_time = self.config.get_setting('schedule_time', '11:00')
-        logger.info(f"Работает. Сбор: {target_time}. Ctrl+C — остановить.")
+        logger.info(f"Работает. Сбор и отправка ссылок: {target_time}. Ctrl+C — остановить.")
         try:
             await self.shutdown_event.wait()
         except KeyboardInterrupt:
             logger.info("Остановка...")
         logger.info("Завершение работы...")
-        if self.queue_task and not self.queue_task.done():
-            self.queue_task.cancel()
         polling_task.cancel()
         collection_task.cancel()
         try:
@@ -165,11 +113,6 @@ class AggregatorApp:
             pass
         try:
             await collection_task
-        except asyncio.CancelledError:
-            pass
-        try:
-            if self.queue_task:
-                await self.queue_task
         except asyncio.CancelledError:
             pass
         await application.stop()

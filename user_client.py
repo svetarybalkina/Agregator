@@ -64,7 +64,14 @@ class UserClient:
                 if not self.config.is_posted(channel_id, message.id):
                     entity = await self.client.get_entity(channel_username)
                     channel_title = entity.title if hasattr(entity, 'title') else channel_username
-                    return (message, reactions, channel_title)
+                    return {
+                        'channel_id': channel_id,
+                        'message_id': message.id,
+                        'channel': channel_username,
+                        'channel_title': channel_title,
+                        'reactions': reactions,
+                        'views': message.views or 0
+                    }
             return None
         except Exception as e:
             logger.error(f"Ошибка при анализе канала {channel_username}: {e}")
@@ -72,10 +79,7 @@ class UserClient:
     
     async def collect_posts(self):
         await self.ensure_connected()
-        target_channel = self.config.get_setting('target_channel')
         source_channels = self.config.get_setting('source_channels', [])
-        if not target_channel:
-            raise ValueError("Не указан целевой канал")
         if not source_channels:
             raise ValueError("Не указаны каналы-источники")
         now = datetime.now()
@@ -89,16 +93,8 @@ class UserClient:
                 if result is None:
                     reports.append(f"❌ Канал {channel} проанализирован, постов позавчера не было или все уже отправлены")
                     continue
-                message, reactions, channel_title = result
-                candidates.append({
-                    'channel_id': message.peer_id.channel_id if hasattr(message.peer_id, 'channel_id') else 0,
-                    'message_id': message.id,
-                    'channel': channel,
-                    'channel_title': channel_title,
-                    'reactions': reactions,
-                    'views': message.views or 0
-                })
-                reports.append(f"✅ Канал {channel}: найден пост с {reactions} реакциями")
+                candidates.append(result)
+                reports.append(f"✅ Канал {channel}: найден пост с {result['reactions']} реакциями")
             except Exception as e:
                 error_msg = str(e)
                 if "CHANNEL_PRIVATE" in error_msg:
@@ -116,29 +112,14 @@ class UserClient:
             limit = len(candidates)
         else:
             limit = min(int(limit), len(candidates))
-        top_candidates = candidates[:limit]
-        reports.append(f"\n📊 Отобрано {len(top_candidates)} постов из {len(candidates)} каналов")
-        return top_candidates, reports
+        top = candidates[:limit]
+        reports.append(f"\n📊 Отобрано {len(top)} постов из {len(candidates)} каналов")
+        return top, reports
     
-    async def forward_single_post(self, item: Dict) -> str:
-        await self.ensure_connected()
-        target_channel = self.config.get_setting('target_channel')
-        try:
-            message = await self.client.get_messages(item['channel'], ids=item['message_id'])
-            if not message:
-                return f"❌ Пост из {item['channel']} недоступен (возможно, удален)"
-            await self.client.forward_messages(target_channel, message)
+    def mark_as_posted(self, items: List[Dict]):
+        for item in items:
             self.config.add_posted(
                 channel_id=item['channel_id'],
                 message_id=item['message_id'],
                 channel_title=item['channel']
             )
-            return f"📤 Переслан пост из {item['channel']} ({item['reactions']} реакций)"
-        except Exception as e:
-            error_msg = str(e)
-            if "CHAT_ADMIN_REQUIRED" in error_msg:
-                return f"❌ Ошибка отправки из {item['channel']}: требуются права админа в целевом канале"
-            elif "MESSAGE_ID_INVALID" in error_msg:
-                return f"❌ Ошибка отправки из {item['channel']}: сообщение недоступно для forward"
-            else:
-                return f"❌ Ошибка отправки из {item['channel']}: {error_msg}"

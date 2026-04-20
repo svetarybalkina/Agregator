@@ -21,7 +21,6 @@ class BotHandler:
         self.application.add_handler(CommandHandler("add_channel", self.cmd_add_channel))
         self.application.add_handler(CommandHandler("remove_channel", self.cmd_remove_channel))
         self.application.add_handler(CommandHandler("list_channels", self.cmd_list_channels))
-        self.application.add_handler(CommandHandler("set_target", self.cmd_set_target))
         self.application.add_handler(CommandHandler("set_limit", self.cmd_set_limit))
         self.application.add_handler(CommandHandler("set_time", self.cmd_set_time))
         self.application.add_handler(CommandHandler("run_now", self.cmd_run_now))
@@ -41,14 +40,13 @@ class BotHandler:
             await update.message.reply_text("⛔ У вас нет доступа.")
             return
         await update.message.reply_text(
-            "🤖 Агрегатор каналов (авторепост)\n\n"
+            "🤖 Агрегатор каналов (режим ссылок)\n\n"
             "/add_channel @channel — добавить источник\n"
             "/remove_channel @channel — удалить источник\n"
             "/list_channels — список источников\n"
-            "/set_target @channel — задать целевой канал\n"
-            "/set_limit N или all — лимит постов\n"
+            "/set_limit N или all — сколько постов отбирать\n"
             "/set_time ЧЧ:ММ — время сбора\n"
-            "/run_now — запустить сбор и публикацию сейчас\n"
+            "/run_now — собрать и прислать ссылки сейчас\n"
             "/status — статус"
         )
     
@@ -87,22 +85,8 @@ class BotHandler:
         if not self._check_admin(update):
             return
         channels = self.config.get_setting('source_channels', [])
-        target = self.config.get_setting('target_channel', 'не задан')
         text = "📋 Каналы-источники:\n" + "\n".join([f"• {ch}" for ch in channels]) if channels else "📋 Список пуст"
-        text += f"\n🎯 Целевой канал: {target}"
         await update.message.reply_text(text)
-    
-    async def cmd_set_target(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self._check_admin(update):
-            return
-        if not context.args:
-            await update.message.reply_text("❌ Укажите канал: /set_target @channelname")
-            return
-        channel = context.args[0]
-        if not channel.startswith('@'):
-            channel = '@' + channel
-        self.config.set_setting('target_channel', channel)
-        await update.message.reply_text(f"✅ Целевой канал: {channel}")
     
     async def cmd_set_limit(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._check_admin(update):
@@ -145,43 +129,48 @@ class BotHandler:
     async def cmd_run_now(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._check_admin(update):
             return
-        await update.message.reply_text("🚀 Запускаю сбор и публикацию...")
+        await update.message.reply_text("🚀 Собираю посты...")
         if self.run_collection_callback:
             await self.run_collection_callback()
-            await update.message.reply_text("✅ Сбор выполнен, первая публикация сейчас, далее каждый час")
-        else:
-            await update.message.reply_text("❌ Ошибка: коллбек не настроен")
     
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._check_admin(update):
             return
         channels = self.config.get_setting('source_channels', [])
-        target = self.config.get_setting('target_channel', 'не задан')
         limit = self.config.get_setting('post_limit', 3)
         time_str = self.config.get_setting('schedule_time', '11:00')
         history_count = len(self.config.posted_history)
-        queue_count = len(self.config.get_queue())
         status = (
             f"📊 Статус:\n"
             f"Источников: {len(channels)}/10\n"
-            f"Целевой: {target}\n"
             f"Лимит: {limit}\n"
-            f"Время: {time_str}\n"
-            f"В истории: {history_count}\n"
-            f"В очереди: {queue_count}"
+            f"Время сбора: {time_str}\n"
+            f"В истории: {history_count} постов"
         )
         await update.message.reply_text(status)
     
-    async def send_notification(self, message: str):
+    async def send_links(self, posts: list, reports: list):
+        """Отправка списка ссылок админу"""
         admin_ids = self.config.get_setting('admin_ids', [])
         if not admin_ids or admin_ids == [0] or not self.application:
             return
-        try:
-            await self.application.bot.send_message(
-                admin_ids[0],
-                text=message,
-                read_timeout=30,
-                write_timeout=30
-            )
-        except Exception as e:
-            logger.error(f"Не удалось отправить уведомление: {e}")
+        if not posts:
+            text = "📭 Постов не найдено\n\n" + "\n".join(reports)
+            await self.application.bot.send_message(admin_ids[0], text=text)
+            return
+        lines = ["📊 Топ-посты за позавчера:\n"]
+        for i, post in enumerate(posts, 1):
+            username = post['channel'].replace('@', '')
+            url = f"https://t.me/{username}/{post['message_id']}"
+            lines.append(f"{i}. {post['channel_title']}")
+            lines.append(f"   🔗 {url}")
+            lines.append(f"   👍 {post['reactions']} | 👁 {post['views']}\n")
+        lines.append("—")
+        lines.append("\n".join(reports))
+        text = "\n".join(lines)
+        if len(text) > 4000:
+            parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
+            for part in parts:
+                await self.application.bot.send_message(admin_ids[0], text=part)
+        else:
+            await self.application.bot.send_message(admin_ids[0], text=text)
