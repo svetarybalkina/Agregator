@@ -6,9 +6,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class BotHandler:
-    def __init__(self, config_manager, user_client, run_collection_callback=None):
+    def __init__(self, config_manager, parser, run_collection_callback=None):
         self.config = config_manager
-        self.user_client = user_client
+        self.parser = parser
         self.run_collection_callback = run_collection_callback
         self.application = None
     
@@ -23,11 +23,14 @@ class BotHandler:
         self.application.add_handler(CommandHandler("list_channels", self.cmd_list_channels))
         self.application.add_handler(CommandHandler("set_limit", self.cmd_set_limit))
         self.application.add_handler(CommandHandler("set_time", self.cmd_set_time))
+        self.application.add_handler(CommandHandler("set_proxy", self.cmd_set_proxy))
         self.application.add_handler(CommandHandler("run_now", self.cmd_run_now))
         self.application.add_handler(CommandHandler("status", self.cmd_status))
         return self.application
     
     def _check_admin(self, update: Update) -> bool:
+        if not update or not update.effective_user:
+            return False
         admin_ids = self.config.get_setting('admin_ids', [])
         user_id = update.effective_user.id
         if not admin_ids or admin_ids == [0]:
@@ -36,21 +39,26 @@ class BotHandler:
         return user_id in admin_ids
     
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not update.message:
+            return
         if not self._check_admin(update):
             await update.message.reply_text("⛔ У вас нет доступа.")
             return
         await update.message.reply_text(
-            "🤖 Агрегатор каналов (режим ссылок)\n\n"
+            "🤖 Агрегатор каналов (веб-парсер)\n\n"
             "/add_channel @channel — добавить источник\n"
             "/remove_channel @channel — удалить источник\n"
             "/list_channels — список источников\n"
             "/set_limit N или all — сколько постов отбирать\n"
             "/set_time ЧЧ:ММ — время сбора\n"
+            "/set_proxy url — настроить прокси (или 'none')\n"
             "/run_now — собрать и прислать ссылки сейчас\n"
             "/status — статус"
         )
     
     async def cmd_add_channel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not update.message:
+            return
         if not self._check_admin(update):
             return
         if not context.args:
@@ -68,6 +76,8 @@ class BotHandler:
             await update.message.reply_text(f"❌ {e}")
     
     async def cmd_remove_channel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not update.message:
+            return
         if not self._check_admin(update):
             return
         if not context.args:
@@ -82,6 +92,8 @@ class BotHandler:
             await update.message.reply_text(f"⚠️ Не найден")
     
     async def cmd_list_channels(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not update.message:
+            return
         if not self._check_admin(update):
             return
         channels = self.config.get_setting('source_channels', [])
@@ -89,6 +101,8 @@ class BotHandler:
         await update.message.reply_text(text)
     
     async def cmd_set_limit(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not update.message:
+            return
         if not self._check_admin(update):
             return
         if not context.args:
@@ -110,6 +124,8 @@ class BotHandler:
                 await update.message.reply_text("❌ Число или 'all'")
     
     async def cmd_set_time(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not update.message:
+            return
         if not self._check_admin(update):
             return
         if not context.args:
@@ -126,7 +142,22 @@ class BotHandler:
         except ValueError:
             await update.message.reply_text("❌ Формат: ЧЧ:ММ")
     
+    async def cmd_set_proxy(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not update.message:
+            return
+        if not self._check_admin(update):
+            return
+        if not context.args or context.args[0].lower() == 'none':
+            self.config.set_setting('proxy', None)
+            await update.message.reply_text("✅ Прокси удален")
+            return
+        proxy_url = context.args[0]
+        self.config.set_setting('proxy', proxy_url)
+        await update.message.reply_text(f"✅ Прокси установлен: {proxy_url}")
+    
     async def cmd_run_now(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not update.message:
+            return
         if not self._check_admin(update):
             return
         await update.message.reply_text("🚀 Собираю посты...")
@@ -134,18 +165,23 @@ class BotHandler:
             await self.run_collection_callback()
     
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not update.message:
+            return
         if not self._check_admin(update):
             return
         channels = self.config.get_setting('source_channels', [])
         limit = self.config.get_setting('post_limit', 3)
         time_str = self.config.get_setting('schedule_time', '11:00')
+        proxy = self.config.get_setting('proxy', 'не используется')
         history_count = len(self.config.posted_history)
         status = (
             f"📊 Статус:\n"
-            f"Источников: {len(channels)}/10\n"
+            f"Источников: {len(channels)}\n"
             f"Лимит: {limit}\n"
             f"Время сбора: {time_str}\n"
-            f"В истории: {history_count} постов"
+            f"Прокси: {proxy}\n"
+            f"В истории: {history_count} постов\n\n"
+            f"Отправьте /run_now для ручного сбора"
         )
         await update.message.reply_text(status)
     
@@ -162,9 +198,14 @@ class BotHandler:
         for i, post in enumerate(posts, 1):
             username = post['channel'].replace('@', '')
             url = f"https://t.me/{username}/{post['message_id']}"
+            text_preview = post.get('text', '')[:100]
             lines.append(f"{i}. {post['channel_title']}")
             lines.append(f"   🔗 {url}")
-            lines.append(f"   👍 {post['reactions']} | 👁 {post['views']}\n")
+            lines.append(f"   👁 {post['views']} просмотров")
+            if text_preview:
+                lines.append(f"   📝 {text_preview}...\n")
+            else:
+                lines.append("")
         lines.append("—")
         lines.append("\n".join(reports))
         text = "\n".join(lines)

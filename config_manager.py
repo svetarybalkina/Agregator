@@ -80,8 +80,6 @@ class ConfigManager:
         if not channel.startswith('@'):
             channel = '@' + channel
         if channel not in self.config['source_channels']:
-            if len(self.config['source_channels']) >= 10:
-                raise ValueError("Максимум 10 каналов")
             self.config['source_channels'].append(channel)
             self.save_config()
             return True
