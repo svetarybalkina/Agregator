@@ -1,0 +1,36 @@
+# Local secrets and runtime configuration
+.env
+.env.*
+!.env.example
+collections.json
+collections.local.json
+config.local.json
+config copy.json
+sources.json
+
+# Telegram user sessions
+*.session
+*.session-journal
+
+# Runtime state
+aggregator.log
+*.log
+posted*.json
+queue.json
+
+# Python cache/build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+
+# Editor/OS noise
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

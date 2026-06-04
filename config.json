@@ -1,0 +1,10 @@
+{
+  "admin_ids": [],
+  "bot_token": "",
+  "api_id": null,
+  "api_hash": "",
+  "target_channel": "",
+  "post_limit": 30,
+  "schedule_time": "06:00",
+  "session_name": "aggregator_session"
+}

@@ -1,0 +1,9 @@
+{
+  "collections": {
+    "example": [
+      "@telegram",
+      "@durov"
+    ]
+  },
+  "active": "example"
+}
